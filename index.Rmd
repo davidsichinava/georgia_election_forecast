@@ -1,0 +1,211 @@
+---
+title: "საარჩევნო პროგნოზები"
+output:
+  html_document:
+    css: "css/style.css"
+---
+
+ამ ვებსაიტზე წარმოგიდგენთ ღიად ხელმისაწვდომ მონაცემებზე დაყრდნობით მომზადებულ საპრეზიდენტო არჩევნების შედეგების პროგნოზის ორ ვარიანტს. პირველი მათგანი წინასაარჩევნო გამოკითხვების შედეგების შეწონილი საშუალო მნიშვნელობებითაა გამოთვლილი,  მეორე მეთოდი კი სტატისტიკურ მოდელირებას ეფუძნება. მიდგომების შესახებ უფრო დეტალურად შეგიძლიათ, მეთოდოლოგიის სექციაში წაიკითხოთ.
+
+გაითვალისწინეთ, რომ თუკი ანალიზის რეპლიკაცია გსურთ, ამისთვის საჭიროა `rstan` ბიბლიოთეკის დაყენება, ასევე - ბაიესური სტატისტიკის ელემენტარული პრინციპების ცოდნა. ამასთან, გირჩევთ, რომ ნუ ეცდებით ვინდოუსის სისტემაზე მთელი დოკუმენტის სრულად კომპილირებას, რადგან ამ შემთხვევაში ფონტები ირევა და ქართული ასოების ნაცვლად, დიაგრამებზე იუნიკოდის კოდებს დაინახავთ. უმჯობესია, კოდის ნაწილები (chunks) ცალ-ცალკე შეასრულოთ და დიაგრამები ისე შეინახოთ.
+
+უფრო დეტალურად ნახეთ მისამართზე www.pollster.ge. ამასთან, საიტზე წარმოდგენილი არაა გუშინ გვიან ღამით, ,,ევროპული საქართველოს'' მიერ გაზიარებული კვლევის შედეგები.
+
+## სიმულირებული პროპორციები
+
+საარჩევნო პროგნოზის ამ ვარიანტში წარმოდგენილია 2000-ჯერ სიმულირებული არჩევნების შედეგების განაწილება, დიაგრამებზე გაკეთებული წარწერები სიმულაციების მედიანურ მნიშვნელობებს აღნიშნავს. აქ ყურადღება უნდა მივაქციოთ იმას, რომ სალომე ზურაბიშილის შემთხვევაში, სიმულირებული შედეგების ზუსტად მეოთხედი კვეთს 50%-იან ზღვარს, რაც იმაზე მიგვითითებს, რომ 25%-ია იმის შანსი, რომ ხელისუფლების მიერ მხარდაჭერილი კანდიდატი პირველივე ტურში მოიპოვებს გამარჯვებას. შესაძლოა, 25%-იანი ალბათობა მცირედ მოგეჩვენოთ, მაგრამ 2016 წლის საპრეზიდენტო არჩევნებში დონალდ ტრამპის წარმატების შანსებს ერთ-ერთი პროგნოზი [29%-ით](https://projects.fivethirtyeight.com/2016-election-forecast/) აფასებდა. ასე, რომ მოულოდნელი არ იქნება, თუკი ზურაბიშვილი არჩევნების პირველივე ტურში მიაღწევს წარმატებას. ზურაბიშვილისგან განსხვავებით, ვაშაძემ 2000 სიმულაციიდან მხოლოდ ერთში გადალახა 50%-იანი ზღვარი, ხოლო ბაქრაძემ - ვერცერთში. ასე, რომ ამ ორი კანდიდატის გამარჯვება პირველ ტურში თითქმის საერთოდ არაა მოსალოდნელი. 
+
+```{r, include = T, echo = FALSE, message=FALSE, warning=FALSE, results='asis', cache=TRUE, eval=FALSE}
+library(extrafont); library(dplyr); library(ggplot2); library(rstan); library(reshape2); library(stringr); library(lubridate); library(readxl); library(highcharter); library(tidyr)
+
+options(mc.cores = parallel::detectCores())
+
+
+
+# The polling data
+polls <- read_excel("calculations.xlsx", sheet = "PropsCalc")%>%
+    mutate(N = 1:n())%>%
+    mutate(Date=ymd(Date))%>%
+    mutate(sigma=sigma/4)
+
+polls <- polls[4:nrow(polls), ]
+
+# One row for each day, one column for each poll on that day, -9 for missing values
+Y_dream <- polls %>% dcast(Date ~ N, value.var = "GD_Cand") %>% 
+  dplyr::select(-Date) %>% 
+  as.data.frame %>% as.matrix
+Y_dream[is.na(Y_dream)] <- -9
+
+Y_unm <- polls %>% dcast(Date ~ N, value.var = "UNM_Cand") %>% 
+  dplyr::select(-Date) %>% 
+  as.data.frame %>% as.matrix
+Y_unm[is.na(Y_unm)] <- -9
+
+Y_mleg <- polls %>% dcast(Date ~ N, value.var = "MLED_Cand") %>% 
+  dplyr::select(-Date) %>% 
+  as.data.frame %>% as.matrix
+Y_mleg[is.na(Y_mleg)] <- -9
+
+# Do the same for margin of errors for those polls
+sigma <- polls %>% dcast(Date ~ N, value.var = "sigma")%>% 
+  dplyr::select(-Date)%>% 
+  as.data.frame %>% as.matrix
+sigma[is.na(sigma)] <- -9
+
+# Run the two models
+
+dream_model <- stan(".stan", 
+                      data = list(T = nrow(Y_dream), 
+                                  polls = ncol(Y_dream), 
+                                  Y = Y_dream, 
+                                  sigma = sigma,
+                                  initial_prior = 0.5581),
+                      control = list(adapt_delta = 0.999999999999))
+
+unm_model <- stan(".stan", 
+                    data = list(T = nrow(Y_unm), 
+                                polls = ncol(Y_unm), 
+                                Y = Y_unm, 
+                                sigma = sigma,
+                                initial_prior = 0.1708),
+                    control = list(adapt_delta = 0.999999))
+
+mleg_model <- stan(".stan", 
+                    data = list(T = nrow(Y_mleg), 
+                                polls = ncol(Y_mleg), 
+                                Y = Y_mleg, 
+                                sigma = sigma,
+                                initial_prior = 0.104),
+                    control = list(adapt_delta = 0.999999))
+
+
+# Pull the state vectors
+
+mu_dream <- rstan::extract(dream_model, pars = "mu", permuted = T)[[1]] %>% 
+  as.data.frame
+
+mu_unm <- rstan::extract(unm_model, pars = "mu", permuted = T)[[1]] %>% 
+  as.data.frame
+
+mu_mleg <- rstan::extract(mleg_model, pars = "mu", permuted = T)[[1]] %>% 
+  as.data.frame
+# Rename to get dates
+names(mu_dream) <- unique(paste0(polls$Date))
+names(mu_unm) <- unique(paste0(polls$Date))
+names(mu_mleg) <- unique(paste0(polls$Date))
+
+
+### Histograms
+
+mu_dream$cand <- "ზურაბიშვილი"
+mu_unm$cand <- "ვაშაძე"
+mu_mleg$cand <- "ბაქრაძე"
+
+preds <- rbind(mu_dream, mu_unm, mu_mleg)
+
+
+
+plt2 <- ggplot(preds, aes(`2018-10-24`, group=cand))+
+  geom_density(aes(y = (..count..)/sum(..count..), fill=cand, color=cand), alpha=0.5)+
+  scale_fill_manual(values=c("#a6cee3", "#e31a1c", "#1f78b4"))+
+  scale_color_manual(values=c("#a6cee3", "#e31a1c", "#1f78b4"))+
+  geom_vline(xintercept = 0.5)+
+  geom_vline(xintercept = median(mu_dream$`2018-10-24`), color="#1f78b4", linetype = "longdash")+
+  geom_vline(xintercept = median(mu_unm$`2018-10-24`), color="#e31a1c", linetype = "longdash")+
+  geom_vline(xintercept = median(mu_mleg$`2018-10-24`), color="#a6cee3", linetype = "longdash")+
+  annotate("text", x = median(mu_dream$`2018-10-24`), y = 0.009,  color="#1f78b4", label = sprintf("%0.f", round(median(mu_dream$`2018-10-24`)*100, digits = 0)))+
+  annotate("text", x = median(mu_unm$`2018-10-24`), y = 0.009,  color="#e31a1c", label = sprintf("%0.f", round(median(mu_unm$`2018-10-24`)*100, digits = 0)))+
+  annotate("text", x = median(mu_mleg$`2018-10-24`), y = 0.009,  color="#a6cee3", label = sprintf("%0.f", round(median(mu_mleg$`2018-10-24`)*100, digits = 0)))+
+  scale_x_continuous(labels=function(x)x*100, limits=c(0, 1))+
+  labs(title="კანდიდატთა სიმულირებული პროპორცია",
+       subtitle="წარწერებზე მოცემულია სიმულაციათა მედიანური მნიშვნელობები",
+	   caption="ეფუძნება 2000 სიმულაციას,\nაპრიორულ ალბათობად მიჩნეულია\n2017 წლის არჩევნების შედეგები",
+	   x="%")+
+  theme_plot+
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+ggsave("plot2.png", plt2, height=4)
+
+```
+
+```{r plot2, echo=FALSE, fig.cap="სიმულირებული მნიშვნელობები", out.width = '80%'}
+knitr::include_graphics("plot2.png")
+```
+
+
+## შეწონილი საშუალო 25 ოქტომბრის მდგომარეობით
+
+როგორც ვხედავთ, წინამდებარე პროგნოზის მიხედვით, ვერცერთი კანდიდატი ვერ ახერხებს პირველ ტურში გამარჯვების მიღწევას. ამასთან, ლიდერობს სალომე ზურაბიშვილი, ხოლო მეორე ადგილზე ,,ერთიანი ნაციონალური მოძრაობის'' კანდიდატი გრიგოლ ვაშაძეა. დავით ბაქრაძეს 14 პროცენტით მესამე ადგილი უკავია. საქმე რთულადაა სხვა კანდიდატების შემთხვევაში - მათ შესახებ მონაცემები მწირია, შესაბამისად - გაკეთებული პროგნოზებიც ნაკლებად სანდოა. გასათვალისწინებელია, რომ აქ არ არის მოცემული გაურკვევლობის მაჩვენებელი სანდოობის ინტერვალის სახით.
+
+```{r, include = T, echo = FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+```
+
+
+```{r, include = T, echo = FALSE, message=FALSE, warning=FALSE, results='asis', eval=FALSE}
+library(dplyr); library(ggplot2); library(rstan); library(reshape2); library(stringr); library(lubridate); library(readxl); library(highcharter); library(tidyr)
+
+options(mc.cores = parallel::detectCores())
+
+
+theme_plot <- theme(
+  axis.text.y = element_text(colour="black", size = 12, family = "BPG Excelsior 2009"),
+  axis.text.x = element_text(colour="black", size = 12, family="BPG Excelsior 2009"),
+  axis.title.x = element_text(size=12, family = "BPG Excelsior Caps"),
+  axis.title.y = element_text(size=12, family = "BPG Excelsior Caps"),
+  strip.text  = element_text(size=12, family = "BPG Excelsior Caps"),
+  legend.title = element_text(size=8, family = "BPG Excelsior Caps"),
+  legend.text = element_text(size=8, family = "BPG Excelsior 2009"),
+  plot.caption = element_text(size=10, family = "BPG Excelsior 2009"),
+  plot.subtitle = element_text(hjust = 0.5, colour = "Black", size=10, family = "BPG Excelsior Caps"),
+  plot.title = element_text(hjust = 0.5, colour = "Black", size=12, family = "BPG Excelsior Caps"),
+  panel.border = element_rect(fill=NA, linetype = "solid", colour = "black"),
+  panel.background = element_rect(fill = NA),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank()
+)
+
+
+polls <- read_excel("../calculations.xlsx", sheet = "ForR")
+polls <- gather(polls)
+
+polls$key <- factor(polls$key, levels=c("სალომე ზურაბიშვილი", "გრიგოლ ვაშაძე", "დავით ბაქრაძე", "დავით უსუფაშვილი", "ზურაბ ჯაფარიძე", "შალვა ნათელაშვილი", "სხვა"))
+
+plt1 <- ggplot(polls, aes(reorder(key, desc(key)), value))+
+  geom_bar(stat="identity", aes(fill=key))+
+  coord_flip()+
+	scale_fill_manual(values=c("#a6cee3", "#e31a1c", "#1f78b4", "#984ea3", "#4daf4a", "#fb8072", "#ff7f00"))+
+	scale_color_manual(values=c("#a6cee3", "#e31a1c", "#1f78b4", "#984ea3", "#4daf4a", "#fb8072", "#ff7f00"))+
+  scale_y_continuous(labels=function(x)x*100, limits=c(0, 1))+
+	labs(title="კანდიდატთა მიერ მიღებული ხმების პროგნოზი",
+		subtitle="პროპორციების საშუალო შეწონილი",
+		y="%")+
+	geom_text(data=polls,
+            aes(x=key,y=value,label=sprintf("%0.f", round(value*100, digits = 0))),
+            position = position_stack(vjust=1.1),
+            family="BPG Excelsior Caps")+
+	theme_plot+
+	theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+	      axis.ticks.x = element_blank())
+
+
+
+
+ggsave("plot1.png", plt1, height=4)
+
+```
+
+
+```{r plot1, echo=FALSE, fig.cap="საშუალო შეწონილი", out.width = '80%'}
+knitr::include_graphics("plot1.png")
+```
+
+ავტორები: [დავით სიჭინავა](https://twitter.com/davidsichinava), [რატი შუბლაძე](https://twitter.com/ratishub)
